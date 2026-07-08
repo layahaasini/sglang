@@ -42,7 +42,6 @@ from sglang.srt.layers.dp_attention import (
     dp_gather_replicate,
     dp_reduce_scatter_tensor,
     dp_scatter,
-    get_attention_tp_group,
     get_dp_global_num_tokens,
     get_global_dp_buffer,
     get_local_dp_buffer,
@@ -912,7 +911,7 @@ class CommunicateSimpleFn:
             return tuple(gathered_hidden_states)
 
         hidden_states, local_hidden_states = (
-            get_local_dp_buffer(get_attention_tp_group()),
+            get_local_dp_buffer(get_parallel().attn_tp_group),
             hidden_states,
         )
         attn_tp_all_gather_into_tensor(
@@ -1033,7 +1032,7 @@ class CommunicateWithAllReduceAndLayerNormFn:
         (``moe_dense_tp_size > 1``): both hidden states and residual stay in
         ``TP_ATTN_FULL`` across the boundary.
         """
-        hidden_states = get_attention_tp_group().all_reduce(hidden_states)
+        hidden_states = get_parallel().attn_tp_group.all_reduce(hidden_states)
         if hidden_states.shape[0] != 0:
             hidden_states, residual = layernorm(hidden_states, residual)
         return hidden_states, residual
@@ -1058,7 +1057,7 @@ class CommunicateWithAllReduceAndLayerNormFn:
 
         if residual_input_mode == ScatterMode.SCATTERED and context.attn_tp_size > 1:
             residual, local_residual = (
-                get_local_dp_buffer(get_attention_tp_group()),
+                get_local_dp_buffer(get_parallel().attn_tp_group),
                 residual,
             )
             attn_tp_all_gather_into_tensor(residual, local_residual)
@@ -1314,7 +1313,7 @@ class CommunicateSummableTensorPairFn:
         if get_parallel().tp_size == get_parallel().attn_dp_size:
             group = get_tp_group()
         else:
-            group = get_attention_tp_group()
+            group = get_parallel().attn_tp_group
         hidden_states, global_hidden_states = (
             get_local_dp_buffer(group),
             hidden_states,
@@ -1342,7 +1341,7 @@ class CommunicateSummableTensorPairFn:
         hidden_states += residual
         residual = None
         hidden_states, local_hidden_states = (
-            get_local_dp_buffer(get_attention_tp_group()),
+            get_local_dp_buffer(get_parallel().attn_tp_group),
             hidden_states,
         )
         attn_tp_all_gather_into_tensor(
@@ -1404,7 +1403,7 @@ class CommunicateSummableTensorPairFn:
             if get_parallel().tp_size == get_parallel().attn_dp_size:
                 group = get_tp_group()
             else:
-                group = get_attention_tp_group()
+                group = get_parallel().attn_tp_group
             hidden_states_output, global_hidden_states = (
                 get_local_dp_buffer(group),
                 hidden_states,
