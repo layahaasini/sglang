@@ -69,8 +69,7 @@ from sglang.srt.model_executor.cuda_graph_config import (
     check_cuda_graph_backend,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.runtime_context import get_forward, get_parallel
-from sglang.srt.server_args import get_global_server_args
+from sglang.srt.runtime_context import get_forward, get_parallel, get_server_args
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import (
     get_bool_env_var,
@@ -168,7 +167,7 @@ def apply_flashinfer_allreduce_fusion(batch_size: int):
         and batch_size > 0
         and batch_size <= FUSE_ALLREDUCE_MAX_BATCH_SIZE
         and not is_dp_attention_enabled()
-        and get_global_server_args().flashinfer_allreduce_fusion_backend is not None
+        and get_server_args().flashinfer_allreduce_fusion_backend is not None
         and not is_flashinfer_allreduce_unavailable()
     )
 
@@ -184,7 +183,7 @@ def apply_aiter_all_reduce_fusion(input_tensor: torch.Tensor):
         and total_bytes <= 8 * 1024 * 8192
         and get_parallel().tp_size != 6
         and not is_dp_attention_enabled()
-        and get_global_server_args().enable_aiter_allreduce_fusion
+        and get_server_args().enable_aiter_allreduce_fusion
     )
 
 
@@ -263,7 +262,7 @@ class AttnTpContext:
     def init_context(self, q_lora_rank, is_dsa):
         self.is_dsa = is_dsa
         self.allow_input_scattered = (
-            get_global_server_args().enable_attn_tp_input_scattered
+            get_server_args().enable_attn_tp_input_scattered
             and (_is_cuda or _is_npu)
             and q_lora_rank is not None
             and not is_dsa
@@ -272,9 +271,9 @@ class AttnTpContext:
             and get_moe_a2a_backend().is_none()
             and not enable_moe_dense_fully_dp()
             and not check_cuda_graph_backend(Phase.PREFILL, Backend.TC_PIECEWISE)
-            and get_global_server_args().speculative_algorithm != "EAGLE3"
+            and get_server_args().speculative_algorithm != "EAGLE3"
         )
-        if get_global_server_args().enable_attn_tp_input_scattered:
+        if get_server_args().enable_attn_tp_input_scattered:
             if not self.allow_input_scattered:
                 logging.info(
                     "attn_tp_input_scattered is not enabled while other conditions are not met"
@@ -404,7 +403,7 @@ class LayerScatterModes:
             not context.is_layer_sparse
             and context.is_next_layer_sparse
             and enable_moe_dense_fully_dp()
-            and get_global_server_args().enable_two_batch_overlap
+            and get_server_args().enable_two_batch_overlap
         )
 
     @classmethod
@@ -431,7 +430,7 @@ class LayerScatterModes:
 
 
 def enable_moe_dense_fully_dp():
-    return get_global_server_args().moe_dense_tp_size == 1
+    return get_server_args().moe_dense_tp_size == 1
 
 
 class LayerCommunicator:
@@ -460,7 +459,7 @@ class LayerCommunicator:
         )
         self._post_init_communicate()
         self._speculative_algo = SpeculativeAlgorithm.from_string(
-            get_global_server_args().speculative_algorithm
+            get_server_args().speculative_algorithm
         )
 
     def _post_init_communicate(self):
@@ -800,7 +799,7 @@ class LayerCommunicator:
                     and get_parallel().tp_size != 6
                     and not is_dp_attention_enabled()
                     and get_moe_a2a_backend().is_none()
-                    and get_global_server_args().enable_aiter_allreduce_fusion
+                    and get_server_args().enable_aiter_allreduce_fusion
                 )
             )
             and (not self.is_last_layer)
@@ -1105,7 +1104,7 @@ class CommunicateWithAllReduceAndLayerNormFn:
             if not handled:
                 quantize_communications = (
                     not forward_batch.forward_mode.is_decode_or_idle()
-                    and get_global_server_args().enable_quant_communications
+                    and get_server_args().enable_quant_communications
                 )
                 if quantize_communications:
                     hidden_states = attention_tensor_model_parallel_quant_all_reduce(
