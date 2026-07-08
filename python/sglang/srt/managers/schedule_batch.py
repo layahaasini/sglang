@@ -719,6 +719,7 @@ class Req(ReqDllmMixin):
         ] = None,
         return_pooled_hidden_states: bool = False,
         multi_item_delimiter_indices: Optional[List[int]] = None,
+        session_id: Optional[str] = None,
     ):
         # Input and output info
         self.rid = rid
@@ -734,13 +735,14 @@ class Req(ReqDllmMixin):
         # that preserve length would silently corrupt fill_ids.
         self.output_ids = array("q")
         # Full untruncated sequence: origin + output (+ DLLM mask block).
-        # Kept in sync by _refresh_fill_ids; admission only updates fill_len,
-        # never mutates this array's length.
+        # Kept in sync by _refresh_fill_ids; admission only updates
+        # extend_range, never mutates this array's length.
         self.full_untruncated_fill_ids = array("q")
         self.extend_range: Optional[Range] = None
         self.dllm_initialized: bool = False
 
         self.session = session
+        self.session_id = session_id
         self.input_embeds = input_embeds
         self.positional_embed_overrides = positional_embed_overrides
         self.multi_item_delimiter_indices = multi_item_delimiter_indices
@@ -749,8 +751,12 @@ class Req(ReqDllmMixin):
         self.kv_committed_len = 0
         self.kv: ReqKvInfo = ReqKvInfo(kv_allocated_len=0, swa_evicted_seqlen=0)
 
-        # for corss-endoder model
+        # for cross-encoder model
         self.token_type_ids = token_type_ids
+
+        # Tokens in [0, swa_evict_floor) are protected from SWA window eviction.
+        # This is used by prefill-aware SWA models such as Unlimited-OCR to keep prompt/image KV visible during decode.
+        self.swa_evict_floor: int = 0
 
         # The index of the extend / decode batch
         self.extend_batch_idx = 0
@@ -1719,6 +1725,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # Read by ForwardBatch ngram embedding init
     ne_token_table: torch.Tensor = None
+    # Mask marking chunked (not-yet-finished) prefill requests whose sampled
+    # pseudo next-token must NOT be written into the ngram token table.
+    ne_skip_token_table_update: torch.Tensor = None
 
     req_pool_indices: torch.Tensor = None  # shape: [b], int64
     seq_lens: torch.Tensor = None  # shape: [b], int64
@@ -2905,7 +2914,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             page_size=self.tree_cache.page_size,
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-            drop_page_margin=self.tree_cache.is_chunk_cache(),
+            is_chunk_cache=self.tree_cache.is_chunk_cache(),
         )
 
     def __str__(self):
