@@ -304,6 +304,11 @@ class DpFlags(_FlagGroupBase):
     # Hybrid-SSM models materialize idle ranks via the MAX_LEN fabricated-row
     # conversion (set when hf_config has hybrid_override_pattern).
     max_len_with_idle: bool = False
+    # DP gathered-buffer allocation metadata (model hidden size / dtype /
+    # device), set by initialize_dp_attention alongside the flags above.
+    buffer_hidden_size: Any = None
+    buffer_dtype: Any = None
+    buffer_device: Any = None
 
 
 @dataclasses.dataclass
@@ -375,6 +380,13 @@ class ForwardFlags:
         # Sticky across forwards: every ForwardBatch construction writes it;
         # graph runners force False around capture.
         "is_extend_in_batch": False,
+        # DP gathered-buffer sizing for the current forward — written by the
+        # same sticky family (ForwardBatch construction, graph runners, the
+        # TBO ubatch boundaries). None defaults keep read-before-set loud.
+        "dp_global_buffer_len": None,
+        "dp_local_buffer_len": None,
+        "dp_max_padding": False,
+        "dp_global_num_tokens": None,
     }
 
     # Read/written inside compiled graphs (vocab embedding, communicator,
@@ -386,6 +398,10 @@ class ForwardFlags:
             "attn_input_scattered",
             "attn_inputs",
             "is_extend_in_batch",
+            "dp_global_buffer_len",
+            "dp_local_buffer_len",
+            "dp_max_padding",
+            "dp_global_num_tokens",
         }
     )
 

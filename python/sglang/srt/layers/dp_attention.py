@@ -100,20 +100,19 @@ class DpPaddingMode(IntEnum):
 
 
 class _DpGatheredBufferWrapper:
-
-    _hidden_size: int
-    _dtype: torch.dtype
-    _device: torch.device
-    _global_dp_buffer_len: int
-    _local_dp_buffer_len: int
-    _dp_max_padding: bool
-    _global_num_tokens: Optional[List[int]]
+    """Facade for the DP gathered-buffer state: allocation metadata lives on
+    ``flags.dp`` (set once at initialize_dp_attention), per-forward sizing on
+    ``ctx.forward`` (sticky within the thread; the TBO operation lists re-set
+    it at ubatch boundaries)."""
 
     @classmethod
     def set_metadata(cls, hidden_size: int, dtype: torch.dtype, device: torch.device):
-        cls._hidden_size = hidden_size
-        cls._dtype = dtype
-        cls._device = device
+        from sglang.srt.runtime_context import get_flags
+
+        dp = get_flags().dp
+        dp.buffer_hidden_size = hidden_size
+        dp.buffer_dtype = dtype
+        dp.buffer_device = device
 
     @classmethod
     def set_dp_buffer_len(
@@ -123,58 +122,83 @@ class _DpGatheredBufferWrapper:
         dp_max_padding: bool,
         global_num_tokens: Optional[List[int]] = None,
     ):
-        cls._global_dp_buffer_len = global_dp_buffer_len
-        cls._local_dp_buffer_len = local_dp_buffer_len
-        cls._dp_max_padding = dp_max_padding
-        cls._global_num_tokens = global_num_tokens
+        from sglang.srt.runtime_context import get_forward
+
+        forward = get_forward()
+        forward.set("dp_global_buffer_len", global_dp_buffer_len)
+        forward.set("dp_local_buffer_len", local_dp_buffer_len)
+        forward.set("dp_max_padding", dp_max_padding)
+        forward.set("dp_global_num_tokens", global_num_tokens)
 
     @classmethod
     def get_global_dp_buffer(cls, group: GroupCoordinator) -> torch.Tensor:
-        with use_symmetric_memory(group, disabled=not cls._dp_max_padding):
+        from sglang.srt.runtime_context import get_flags, get_forward
+
+        dp = get_flags().dp
+        forward = get_forward()
+        with use_symmetric_memory(group, disabled=not forward.dp_max_padding):
             buffer = torch.empty(
-                (cls._global_dp_buffer_len, cls._hidden_size),
-                dtype=cls._dtype,
-                device=cls._device,
+                (forward.dp_global_buffer_len, dp.buffer_hidden_size),
+                dtype=dp.buffer_dtype,
+                device=dp.buffer_device,
             )
         return buffer
 
     @classmethod
     def get_local_dp_buffer(cls, group: GroupCoordinator) -> torch.Tensor:
-        with use_symmetric_memory(group, disabled=not cls._dp_max_padding):
+        from sglang.srt.runtime_context import get_flags, get_forward
+
+        dp = get_flags().dp
+        forward = get_forward()
+        with use_symmetric_memory(group, disabled=not forward.dp_max_padding):
             buffer = torch.empty(
-                (cls._local_dp_buffer_len, cls._hidden_size),
-                dtype=cls._dtype,
-                device=cls._device,
+                (forward.dp_local_buffer_len, dp.buffer_hidden_size),
+                dtype=dp.buffer_dtype,
+                device=dp.buffer_device,
             )
         return buffer
 
     @classmethod
     def get_global_dp_buffer_len(cls) -> int:
-        return cls._global_dp_buffer_len
+        from sglang.srt.runtime_context import get_forward
+
+        return get_forward().dp_global_buffer_len
 
     @classmethod
     def get_local_dp_buffer_len(cls) -> int:
-        return cls._local_dp_buffer_len
+        from sglang.srt.runtime_context import get_forward
+
+        return get_forward().dp_local_buffer_len
 
     @classmethod
     def get_dp_global_num_tokens(cls) -> List[int]:
-        return cls._global_num_tokens
+        from sglang.srt.runtime_context import get_forward
+
+        return get_forward().dp_global_num_tokens
 
     @classmethod
     def get_dp_hidden_size(cls) -> int:
-        return cls._hidden_size
+        from sglang.srt.runtime_context import get_flags
+
+        return get_flags().dp.buffer_hidden_size
 
     @classmethod
     def get_dp_dtype(cls) -> torch.dtype:
-        return cls._dtype
+        from sglang.srt.runtime_context import get_flags
+
+        return get_flags().dp.buffer_dtype
 
     @classmethod
     def get_dp_device(cls) -> torch.device:
-        return cls._device
+        from sglang.srt.runtime_context import get_flags
+
+        return get_flags().dp.buffer_device
 
     @classmethod
     def is_dp_max_padding(cls) -> bool:
-        return cls._dp_max_padding
+        from sglang.srt.runtime_context import get_forward
+
+        return get_forward().dp_max_padding
 
 
 def set_dp_buffer_len(
