@@ -25,7 +25,7 @@ from sglang.srt.mem_cache.triton_ops.common import (
     get_last_loc_triton_safe,
     write_req_to_token_pool_triton,
 )
-from sglang.srt.server_args import get_global_server_args
+from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import is_cuda, is_hip, is_npu, next_power_of_2, support_triton
 from sglang.srt.utils.common import is_pin_memory_available
 
@@ -53,7 +53,7 @@ def write_cache_indices(
     prefix_tensors: list[torch.Tensor],
     req_to_token_pool: ReqToTokenPool,
 ):
-    if support_triton(get_global_server_args().attention_backend):
+    if support_triton(get_server_args().attention_backend):
         prefix_pointers = torch.tensor(
             [t.data_ptr() for t in prefix_tensors],
             dtype=torch.uint64,
@@ -94,7 +94,7 @@ def get_last_loc(
     req_pool_indices_tensor: torch.Tensor,
     prefix_lens_tensor: torch.Tensor,
 ) -> torch.Tensor:
-    attn_backend = get_global_server_args().attention_backend
+    attn_backend = get_server_args().attention_backend
     uses_triton_dispatch = attn_backend not in ("ascend", "torch_native")
 
     if _is_hip and uses_triton_dispatch:
@@ -248,10 +248,19 @@ def alloc_req_slots(
     reqs: list[Req],
     tree_cache: BasePrefixCache | None,
 ) -> list[int]:
-    """Allocate request slots from the pool."""
+    """Allocate request slots from the pool.
+
+    Fail-loud: raises ``RuntimeError`` if the pool can't satisfy the batch. An
+    alloc failure here means the admission budget (``PrefillAdder``) was wrong
+    and should surface rather than be masked.
+    """
     num_reqs = len(reqs)
     if isinstance(req_to_token_pool, HybridReqToTokenPool):
-        mamba_available_size = req_to_token_pool.mamba_allocator.available_size()
+        # Byte-coordinated for the shared allocator (accounts for the peer full
+        # sub-pool's bytes); plain slot free count for the non-shared one.
+        mamba_available_size = (
+            req_to_token_pool.mamba_allocator.schedulable_available_size()
+        )
         if tree_cache.supports_mamba():
             factor = (
                 MAMBA_STATE_PER_REQ_PREFIX_CACHE_LAZY
@@ -284,7 +293,7 @@ def _alloc_page_size(batch: ScheduleBatch) -> int:
     # path do we branch on the real allocator's page_size so the paged path is
     # taken; everywhere else tree_cache.page_size is authoritative and the two
     # are equal (dcp_size == 1), so behavior is unchanged.
-    if (_is_hip or _is_cuda) and get_global_server_args().dcp_size > 1:
+    if (_is_hip or _is_cuda) and get_server_args().dcp_size > 1:
         return batch.tree_cache.token_to_kv_pool_allocator.page_size
     return batch.tree_cache.page_size
 
@@ -554,6 +563,8 @@ def alloc_for_spec_decode(
     nxt_kv_lens: torch.Tensor,
     nxt_kv_lens_cpu: torch.Tensor,
     num_needed_tokens: int,
+    batch: Optional[ScheduleBatch] = None,
+    dsv4_npu_aware: bool = False,
 ) -> None:
     if num_needed_tokens > 0:
         if tree_cache.token_to_kv_pool_allocator.page_size == 1:
@@ -562,15 +573,39 @@ def alloc_for_spec_decode(
             last_loc = get_last_loc(
                 req_to_token_pool.req_to_token, req_pool_indices, cur_kv_lens
             )
-            out_cache_loc = alloc_paged_token_slots_extend(
-                tree_cache,
-                cur_kv_lens,
-                cur_kv_lens_cpu,
-                nxt_kv_lens,
-                nxt_kv_lens_cpu,
-                last_loc,
-                num_needed_tokens,
-            )
+            if dsv4_npu_aware:
+                device_type = getattr(
+                    batch.device, "type", str(batch.device).split(":", 1)[0]
+                )
+                if device_type == "npu":
+                    from sglang.srt.hardware_backend.npu.dsv4.dsv4_allocator import (
+                        alloc_paged_token_slots_extend_npu,
+                    )
+
+                    alloc_extend_func = alloc_paged_token_slots_extend_npu
+                else:
+                    alloc_extend_func = alloc_paged_token_slots_extend
+                out_cache_loc = alloc_extend_func(
+                    tree_cache,
+                    cur_kv_lens,
+                    cur_kv_lens_cpu,
+                    nxt_kv_lens,
+                    nxt_kv_lens_cpu,
+                    last_loc,
+                    num_needed_tokens,
+                    req_pool_indices=req_pool_indices,
+                    batch=batch,
+                )
+            else:
+                out_cache_loc = alloc_paged_token_slots_extend(
+                    tree_cache,
+                    cur_kv_lens,
+                    cur_kv_lens_cpu,
+                    nxt_kv_lens,
+                    nxt_kv_lens_cpu,
+                    last_loc,
+                    num_needed_tokens,
+                )
         # Updating req_to_token is a write to a shared tensor: it must not overlap
         # with the previous batch's forward, which also reads req_to_token.
         assign_req_to_token_pool_func(
